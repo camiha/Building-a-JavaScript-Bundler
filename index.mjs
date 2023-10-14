@@ -45,6 +45,8 @@ const resolver = new Resolver.default(moduleMap, {
 const seen = new Set();
 const modules = new Map();
 const queue = [entryPoint];
+let id = 0;
+
 while (queue.length) {
 	const module = queue.shift();
 
@@ -68,7 +70,9 @@ while (queue.length) {
 	const moduleBody = code.match(/module\.exports\s+=\s+(.*?);/)?.[1] || "";
 
 	const metadata = {
-		code: moduleBody || code,
+		// 各モジュールに一意なIDを割り当てる
+		id: id++,
+		code,
 		dependencyMap,
 	};
 	modules.set(module, metadata);
@@ -78,20 +82,34 @@ while (queue.length) {
 console.log(chalk.bold(`❯ Found ${chalk.blue(seen.size)} files`));
 console.log(chalk.bold("❯ Serializing bundle"));
 
+// モジュールを `define(<id>, function(module, exports, require) { <code> }) で囲む
+const wrapModule = (id, code) => {
+	return `define(${id}, function(module, exports, require) {\n${code}});`;
+};
+const output = [];
 // エントリーポイントを最後に処理するため、逆方向に各モジュールを処理
 for (const [module, metadata] of Array.from(modules).reverse()) {
-	let { code } = metadata;
+	let { id, code } = metadata;
 	for (const [dependencyName, dependencyPath] of metadata.dependencyMap) {
-		// 依存関係のモジュール本体を、それを必要とするモジュールにインライン化
+		const dependency = modules.get(dependencyPath);
+		// 必要なモジュールの参照を、生成されたモジュールと入れ替える
+		// シンプルな実装のために正規表現を用いるが、実際のバンドラは AST 変換を行なっている
 		code = code.replace(
 			new RegExp(
-				// .` と `/` をエスケープ
 				`require\\(('|")${dependencyName.replace(/[\/.]/g, "\\$&")}\\1\\)`,
 			),
-			modules.get(dependencyPath).code,
+			`require(${dependency.id})`,
 		);
 	}
-	metadata.code = code;
+	output.push(wrapModule(id, code));
 }
 
-console.log(modules.get(entryPoint).code.replace(/' \+ '/g, ""));
+// バンドルの最初に `require`-runtime を追加
+output.unshift(fs.readFileSync("./require.js", "utf8"));
+// バントルの最後にエントリーポイントを要求
+output.push(["requireModule(0);"]);
+console.log(output.join("\n"));
+
+if (options.output) {
+	fs.writeFileSync(options.output, output.join("\n"), "utf8");
+}
