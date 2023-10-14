@@ -2,12 +2,11 @@ import fs from "node:fs";
 import { cpus } from "node:os";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
-
 import yargs from "yargs";
 import chalk from "chalk";
-
 import JestHasteMap from "jest-haste-map";
 import Resolver from "jest-resolve";
+import { Worker } from "jest-worker";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "product");
 
@@ -18,9 +17,7 @@ const hasteMapOptions = {
 	platforms: [],
 	rootDir: root,
 	roots: [root],
-	retainAllFiles: true,
 };
-
 const hasteMap = new JestHasteMap.default(hasteMapOptions);
 await hasteMap.setupCachePath(hasteMapOptions);
 const { hasteFS, moduleMap } = await hasteMap.build();
@@ -67,8 +64,6 @@ while (queue.length) {
 
 	const code = fs.readFileSync(module, "utf8");
 	// `module.exports =` 以降のコードを取得
-	const moduleBody = code.match(/module\.exports\s+=\s+(.*?);/)?.[1] || "";
-
 	const metadata = {
 		// 各モジュールに一意なIDを割り当てる
 		id: id++,
@@ -86,30 +81,46 @@ console.log(chalk.bold("❯ Serializing bundle"));
 const wrapModule = (id, code) => {
 	return `define(${id}, function(module, exports, require) {\n${code}});`;
 };
-const output = [];
-// エントリーポイントを最後に処理するため、逆方向に各モジュールを処理
-for (const [module, metadata] of Array.from(modules).reverse()) {
-	let { id, code } = metadata;
-	for (const [dependencyName, dependencyPath] of metadata.dependencyMap) {
-		const dependency = modules.get(dependencyPath);
-		// 必要なモジュールの参照を、生成されたモジュールと入れ替える
-		// シンプルな実装のために正規表現を用いるが、実際のバンドラは AST 変換を行なっている
-		code = code.replace(
-			new RegExp(
-				`require\\(('|")${dependencyName.replace(/[\/.]/g, "\\$&")}\\1\\)`,
-			),
-			`require(${dependency.id})`,
-		);
-	}
-	output.push(wrapModule(id, code));
-}
 
-// バンドルの最初に `require`-runtime を追加
-output.unshift(fs.readFileSync("./require.js", "utf8"));
-// バントルの最後にエントリーポイントを要求
-output.push(["requireModule(0);"]);
-console.log(output.join("\n"));
+const worker = new Worker(
+	join(dirname(fileURLToPath(import.meta.url)), "worker.js"),
+	{
+		enableWorkerThreads: true,
+	},
+);
+
+const results = await Promise.all(
+	Array.from(modules)
+		.reverse()
+		.map(async ([module, metadata]) => {
+			let { id, code } = metadata;
+			({ code } = await worker.transformFile(code));
+			for (const [dependencyName, dependencyPath] of metadata.dependencyMap) {
+				const dependency = modules.get(dependencyPath);
+				// 必要なモジュールの参照を、生成されたモジュールと入れ替える
+				// シンプルな実装のために正規表現を用いるが、実際のバンドラは AST 変換を行なっている
+				code = code.replace(
+					new RegExp(
+						`require\\(('|")${dependencyName.replace(/[\/.]/g, "\\$&")}\\1\\)`,
+					),
+					`require(${dependency.id})`,
+				);
+			}
+			return wrapModule(id, code);
+		}),
+);
+
+const output = [
+	fs.readFileSync("./require.js", "utf8"),
+	...results,
+	// バントルの最後にエントリーポイントを要求
+	"requireModule(0);",
+].join("\n");
+
+console.log(output);
 
 if (options.output) {
-	fs.writeFileSync(options.output, output.join("\n"), "utf8");
+	fs.writeFileSync(options.output, output, "utf8");
 }
+
+worker.end();
