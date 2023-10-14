@@ -10,6 +10,7 @@ import JestHasteMap from "jest-haste-map";
 import Resolver from "jest-resolve";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "product");
+
 const hasteMapOptions = {
 	extensions: ["js"],
 	maxWorkers: cpus().length,
@@ -21,12 +22,12 @@ const hasteMapOptions = {
 };
 
 const hasteMap = new JestHasteMap.default(hasteMapOptions);
-// This line is only necessary in `jest-haste-map` version 28 or later.
 await hasteMap.setupCachePath(hasteMapOptions);
 const { hasteFS, moduleMap } = await hasteMap.build();
 
 const options = yargs(process.argv).argv;
 const entryPoint = resolve(process.cwd(), options.entryPoint);
+
 if (!hasteFS.exists(entryPoint)) {
 	throw new Error(
 		"`--entry-point` does not exist. Please provide a path to a valid file.",
@@ -46,13 +47,13 @@ const modules = new Map();
 const queue = [entryPoint];
 while (queue.length) {
 	const module = queue.shift();
+
 	if (seen.has(module)) {
 		continue;
 	}
 	seen.add(module);
 
-	// Resolve each dependency and store it based on their "name",
-	// that is the actual occurrence in code via `require('<name>');`.
+	// 各依存関係を解決し、名前に基づいて格納する
 	const dependencyMap = new Map(
 		hasteFS
 			.getDependencies(module)
@@ -63,7 +64,7 @@ while (queue.length) {
 	);
 
 	const code = fs.readFileSync(module, "utf8");
-	// Extract the "module body", in our case everything after `module.exports =`;
+	// `module.exports =` 以降のコードを取得
 	const moduleBody = code.match(/module\.exports\s+=\s+(.*?);/)?.[1] || "";
 
 	const metadata = {
@@ -75,16 +76,16 @@ while (queue.length) {
 }
 
 console.log(chalk.bold(`❯ Found ${chalk.blue(seen.size)} files`));
-
 console.log(chalk.bold("❯ Serializing bundle"));
-// Go through each module (backwards, to process the entry-point last).
+
+// エントリーポイントを最後に処理するため、逆方向に各モジュールを処理
 for (const [module, metadata] of Array.from(modules).reverse()) {
 	let { code } = metadata;
 	for (const [dependencyName, dependencyPath] of metadata.dependencyMap) {
-		// Inline the module body of the dependency into the module that requires it.
+		// 依存関係のモジュール本体を、それを必要とするモジュールにインライン化
 		code = code.replace(
 			new RegExp(
-				// Escape `.` and `/`.
+				// .` と `/` をエスケープ
 				`require\\(('|")${dependencyName.replace(/[\/.]/g, "\\$&")}\\1\\)`,
 			),
 			modules.get(dependencyPath).code,
